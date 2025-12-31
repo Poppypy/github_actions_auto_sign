@@ -24,11 +24,14 @@ jobs:
           TG_API_HASH: ${{ secrets.TG_API_HASH }}
           TG_PHONE_NUMBER: ${{ secrets.TG_PHONE_NUMBER }}
           TG_2FA_PASSWORD: ${{ secrets.TG_2FA_PASSWORD }}
+          # Optional: seconds to wait for /code and /pwd (default 300)
+          TG_LOGIN_TIMEOUT: ${{ vars.TG_LOGIN_TIMEOUT }}
 
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_ADMIN_CHAT_ID: ${{ secrets.TG_ADMIN_CHAT_ID }}
+          # Optional: set to 1 to auto deleteWebhook (if your bot has webhook or is conflicted)
+          TG_DELETE_WEBHOOK: ${{ vars.TG_DELETE_WEBHOOK }}
 
           # 用于把 TG_SESSION 写回 Secrets
           REPO_TOKEN: ${{ secrets.REPO_TOKEN }}
         run: python auto_SIGN.py --login-only
-

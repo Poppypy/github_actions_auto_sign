@@ -104,10 +104,12 @@ class SignTask:
 class BotInteractor:
     """通过 Telegram Bot API 与你交互：发提示、收 /code、收 /pwd。"""
 
-    def __init__(self, token: str, admin_chat_id: str):
+    def __init__(self, token: str, admin_chat_id: str, *, auto_delete_webhook: bool = False):
         self.token = token
         self.admin_chat_id = str(admin_chat_id)
         self.base = f"https://api.telegram.org/bot{self.token}"
+        self.auto_delete_webhook = auto_delete_webhook
+        self._webhook_checked = False
 
     def send(self, text: str) -> None:
         try:
@@ -119,7 +121,47 @@ class BotInteractor:
         except Exception:
             pass
 
-    def _flush_offset(self) -> int:
+    def _ensure_polling_ready(self) -> None:
+        """
+        Bot API 的 getUpdates 与 webhook 互斥：
+        - 如果 bot 设置了 webhook，则 getUpdates 会一直收不到消息
+        这里做一次检查，并在允许时自动 deleteWebhook。
+        """
+        if self._webhook_checked:
+            return
+        self._webhook_checked = True
+
+        try:
+            r = requests.get(f"{self.base}/getWebhookInfo", timeout=15)
+            data = r.json()
+            if not data.get("ok"):
+                return
+            info = data.get("result") or {}
+            url = (info.get("url") or "").strip()
+            if not url:
+                return
+
+            if not self.auto_delete_webhook:
+                raise RuntimeError(
+                    "检测到你的 TG_BOT_TOKEN 已设置 webhook，getUpdates 无法收验证码。\n"
+                    "解决：换一个专用 bot，或先关闭 webhook（或设置 TG_DELETE_WEBHOOK=1 让脚本自动关闭）。"
+                )
+
+            log("检测到 webhook 已启用，正在 deleteWebhook…")
+            try:
+                requests.post(
+                    f"{self.base}/deleteWebhook",
+                    data={"drop_pending_updates": True},
+                    timeout=20,
+                )
+                log("deleteWebhook 已执行")
+            except Exception as e:
+                raise RuntimeError(f"deleteWebhook 失败：{e}") from None
+        except Exception:
+            raise
+
+    def flush_offset(self) -> int:
+        self._ensure_polling_ready()
         try:
             r = requests.get(f"{self.base}/getUpdates", params={"timeout": 0}, timeout=15)
             data = r.json()
@@ -129,13 +171,16 @@ class BotInteractor:
             pass
         return 0
 
-    def wait_command(self, pattern: "re.Pattern[str]", timeout: int) -> Optional[str]:
+    def wait_command(self, pattern: "re.Pattern[str]", timeout: int, *, offset: Optional[int] = None) -> Optional[str]:
         """
         仅接收来自 TG_ADMIN_CHAT_ID 的 message.text。
         返回 pattern 捕获组 1。
         """
-        offset = self._flush_offset()
+        self._ensure_polling_ready()
+        offset = self.flush_offset() if offset is None else int(offset)
         deadline = time.time() + timeout
+        last_desc: str = ""
+        last_desc_ts = 0.0
 
         while time.time() < deadline:
             try:
@@ -146,12 +191,34 @@ class BotInteractor:
                 )
                 data = r.json()
                 if not data.get("ok"):
+                    desc = str(data.get("description") or "").strip()
+                    if desc:
+                        # 这类问题通常不会“等一等就好”，直接报错更友好
+                        if "Conflict" in desc or "webhook" in desc.lower():
+                            raise RuntimeError(
+                                "Telegram Bot getUpdates 失败："
+                                f"{desc}\n"
+                                "可能原因：该 bot 设置了 webhook，或同一个 TG_BOT_TOKEN 正被其它程序/服务拉取更新。\n"
+                                "解决：停掉其它实例/删除 webhook（或换一个专用 bot）。"
+                            )
+                        # 其它错误：降频打印，避免刷屏
+                        now = time.time()
+                        if desc != last_desc or (now - last_desc_ts) > 30:
+                            log(f"Telegram Bot getUpdates 返回错误：{desc}")
+                            last_desc = desc
+                            last_desc_ts = now
                     time.sleep(2)
                     continue
 
                 for upd in data.get("result", []):
                     offset = int(upd["update_id"]) + 1
-                    msg = upd.get("message") or {}
+                    msg = (
+                        upd.get("message")
+                        or upd.get("edited_message")
+                        or upd.get("channel_post")
+                        or upd.get("edited_channel_post")
+                        or {}
+                    )
                     chat = msg.get("chat") or {}
                     if str(chat.get("id")) != self.admin_chat_id:
                         continue
@@ -160,6 +227,8 @@ class BotInteractor:
                     m = pattern.match(text)
                     if m:
                         return m.group(1)
+            except RuntimeError:
+                raise
             except Exception:
                 pass
 
@@ -286,12 +355,17 @@ async def ensure_login(
 
     code: Optional[str] = None
     if bot is not None:
+        offset = bot.flush_offset()
         bot.send(
             "需要 Telegram 登录验证码。\n"
             f"请在 {code_timeout}s 内回复：/code 12345\n"
             "（只接受来自 TG_ADMIN_CHAT_ID 的消息）"
         )
-        code = bot.wait_command(re.compile(r"^/code\\s+(\\d{5,8})$"), timeout=code_timeout)
+        code = bot.wait_command(
+            re.compile(r"^/code(?:@\\w+)?\\s+(\\d{5,8})$"),
+            timeout=code_timeout,
+            offset=offset,
+        )
     else:
         code = input("请输入 Telegram 登录验证码：").strip()
 
@@ -305,7 +379,10 @@ async def ensure_login(
     except SessionPasswordNeededError:
         if not password and bot is not None:
             bot.send("检测到开启了两步验证(2FA)。请回复：/pwd 你的密码")
-            password = bot.wait_command(re.compile(r"^/pwd\\s+(.+)$"), timeout=code_timeout)
+            password = bot.wait_command(
+                re.compile(r"^/pwd(?:@\\w+)?\\s+(.+)$"),
+                timeout=code_timeout,
+            )
 
         if not password and sys.stdin.isatty():
             password = input("请输入两步验证(2FA)密码：").strip()
@@ -406,9 +483,10 @@ async def async_main(args: argparse.Namespace) -> int:
 
     bot_token = (env("TG_BOT_TOKEN") or "").strip()
     admin_chat_id = (env("TG_ADMIN_CHAT_ID") or "").strip()
+    auto_delete_webhook = env_bool("TG_DELETE_WEBHOOK", default=False)
     bot: Optional[BotInteractor] = None
     if bot_token and admin_chat_id:
-        bot = BotInteractor(bot_token, admin_chat_id)
+        bot = BotInteractor(bot_token, admin_chat_id, auto_delete_webhook=auto_delete_webhook)
 
     password = (env("TG_2FA_PASSWORD") or "").strip() or None
 

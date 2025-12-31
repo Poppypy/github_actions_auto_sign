@@ -64,6 +64,13 @@
 3. 机器人会提示你发送：`/code 12345`
 4. 成功后会自动写回：Secrets → `TG_SESSION`
 
+常见问题：我已经发了 `/code 12345`，但工作流提示“未收到验证码”
+- 你的 bot 可能已经配置过 **webhook**，或者同一个 `TG_BOT_TOKEN` 正被其它程序占用（会导致 `getUpdates` 收不到消息）
+  - 最简单：换一个专用 bot token
+  - 或者：在仓库 Variables 里加 `TG_DELETE_WEBHOOK=1`，再手动跑一次 `TG_LOGIN`（脚本会尝试自动 `deleteWebhook`）
+- 如果你是在群里和 bot 交互，命令可能会变成：`/code@你的机器人用户名 12345`（脚本已兼容）
+ - 如果你回复慢，可以在仓库 Variables 里加 `TG_LOGIN_TIMEOUT=600`（单位秒）
+
 ## 5) 自动签到
 
 工作流：`AUTO_SIGN`
@@ -72,4 +79,3 @@
 
 可选变量：
 - `SIGN_DELAY_RANGE`：每条消息之间随机等待（默认 `1-3` 秒），例如 `0.5-2`
-
