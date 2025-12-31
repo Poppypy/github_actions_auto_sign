@@ -462,8 +462,8 @@ async def ensure_login(
         log(f"已发送提示到 Telegram，等待 /code（最长 {code_timeout}s）…")
         code = bot.wait_command(
             # group(1) 会进一步提取数字（兼容 123456 / 123 456 / 123-456 / "123456" 等格式）
-            # 这里用 \\s* 而不是 \\s+，以兼容 Telegram 里可能出现的“不可见分隔符”
-            re.compile(r"^/code(?:@\\w+)?\\s*(.*)$"),
+            # 这里用 \s* 而不是 \s+，以兼容 Telegram 里可能出现的“不可见分隔符”
+            re.compile(r"^/code(?:@\w+)?\s*(.*)$"),
             timeout=code_timeout,
             offset=offset,
         )
@@ -489,7 +489,7 @@ async def ensure_login(
             bot.send("检测到开启了两步验证(2FA)。请回复：/pwd 你的密码")
             log(f"等待 /pwd（最长 {code_timeout}s）…")
             password = bot.wait_command(
-                re.compile(r"^/pwd(?:@\\w+)?\\s*(.*)$"),
+                re.compile(r"^/pwd(?:@\w+)?\s*(.*)$"),
                 timeout=code_timeout,
             )
 
