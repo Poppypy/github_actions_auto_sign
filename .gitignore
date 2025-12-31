@@ -3,4 +3,9 @@ __pycache__/
 *.session
 .venv/
 .env
-
+.history/
+例子.py
+发信息例子.py
+__tmp_delete_test.txt
+__tmp_rename_test.txt
+__codex_write_test*.txt
