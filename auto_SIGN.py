@@ -44,7 +44,7 @@ import re
 import sys
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 import requests
 from telethon import TelegramClient
@@ -218,10 +218,18 @@ class BotInteractor:
             pass
         return 0
 
-    def wait_command(self, pattern: "re.Pattern[str]", timeout: int, *, offset: Optional[int] = None) -> Optional[str]:
+    def wait_command(
+        self,
+        pattern: "re.Pattern[str]",
+        timeout: int,
+        *,
+        offset: Optional[int] = None,
+        parse_digits: bool = True,
+    ) -> Optional[str]:
         """
         仅接收来自 TG_ADMIN_CHAT_ID 的 message.text。
-        返回 pattern 捕获组 1。
+        - parse_digits=True：返回提取到的 5-8 位数字（用于登录验证码）
+        - parse_digits=False：返回 pattern 捕获到的文本（用于 2FA 密码等）
         """
         self._ensure_polling_ready()
         offset = self.flush_offset() if offset is None else int(offset)
@@ -286,20 +294,32 @@ class BotInteractor:
                     if not m:
                         continue
 
-                    # 允许验证码里带空格/分隔符/不可见字符：提取所有数字后再判断长度
-                    payload = m.group(1)
-                    digits_all = "".join(re.findall(r"\d", payload))
-                    if 5 <= len(digits_all) <= 8:
-                        payload = digits_all
-                    else:
-                        # 再尝试从 payload 内找 5-8 位连续数字（比如消息里夹了其它数字）
-                        groups = re.findall(r"\d{5,8}", payload)
-                        if groups:
-                            payload = groups[-1]
-                        else:
-                            if self.debug_updates:
-                                log(f"DEBUG /code payload 无法解析为 5-8 位数字：{redact_text(payload)!r}")
+                    # 取第一个非空捕获组（兼容使用 alternation 的 pattern）
+                    payload = ""
+                    for g in m.groups():
+                        if g is None:
                             continue
+                        s = str(g).strip()
+                        if s:
+                            payload = s
+                            break
+                    if not payload:
+                        continue
+
+                    if parse_digits:
+                        # 允许验证码里带空格/分隔符/不可见字符：提取所有数字后再判断长度
+                        digits_all = "".join(re.findall(r"\d", payload))
+                        if 5 <= len(digits_all) <= 8:
+                            payload = digits_all
+                        else:
+                            # 再尝试从 payload 内找 5-8 位连续数字（比如消息里夹了其它数字）
+                            groups = re.findall(r"\d{5,8}", payload)
+                            if groups:
+                                payload = groups[-1]
+                            else:
+                                if self.debug_updates:
+                                    log(f"DEBUG payload 无法解析为 5-8 位数字：{redact_text(payload)!r}")
+                                continue
 
                     if self.accept_any:
                         return payload
@@ -449,21 +469,21 @@ async def ensure_login(
     log("未检测到授权，开始登录流程…")
     log("正在向 Telegram 请求登录验证码（send_code_request）…")
     sent = await client.send_code_request(phone_number)
-    log("验证码已发送（请在 Telegram App/SMS 查看），随后把验证码发给机器人：/code 12345")
+    log("验证码已发送（请在 Telegram App/SMS 查看），随后把验证码发给机器人：直接发送数字验证码（或 /code 12345）")
 
     code: Optional[str] = None
     if bot is not None:
         offset = bot.flush_offset()
         bot.send(
             "需要 Telegram 登录验证码。\n"
-            f"请在 {code_timeout}s 内回复：/code 12345\n"
+            f"请在 {code_timeout}s 内回复：直接发送验证码数字（例如 12345），也可以 /code 12345\n"
             "（只接受来自 TG_ADMIN_CHAT_ID 的消息）"
         )
-        log(f"已发送提示到 Telegram，等待 /code（最长 {code_timeout}s）…")
+        log(f"已发送提示到 Telegram，等待验证码（最长 {code_timeout}s）…")
         code = bot.wait_command(
             # group(1) 会进一步提取数字（兼容 123456 / 123 456 / 123-456 / "123456" 等格式）
             # 这里用 \s* 而不是 \s+，以兼容 Telegram 里可能出现的“不可见分隔符”
-            re.compile(r"^/code(?:@\w+)?\s*(.*)$"),
+            re.compile(r"^\s*(?:/code(?:@\w+)?\s*)?([0-9][0-9\s-]{4,15})\s*$"),
             timeout=code_timeout,
             offset=offset,
         )
@@ -472,14 +492,14 @@ async def ensure_login(
 
     if not code:
         raise RuntimeError(
-            "未收到验证码 /code，登录失败。\n"
+            "未收到验证码（/code 或 5-8 位数字），登录失败。\n"
             "排查：\n"
             "1) 确认你是在收到提示的同一个聊天窗口回复（私聊/群）。\n"
             "2) 检查 TG_ADMIN_CHAT_ID 是否填对：私聊=你的 user_id；群里=群 chat_id（-100...）。\n"
             "3) 如果 bot 配过 webhook/被占用，设置 TG_DELETE_WEBHOOK=1 再跑 TG_LOGIN。"
         )
 
-    log(f"已收到 /code：{redact_text(code)!r}，开始 sign_in…")
+    log(f"已收到验证码：{redact_text(code)!r}，开始 sign_in…")
     try:
         await client.sign_in(phone_number, code, phone_code_hash=sent.phone_code_hash)
     except PhoneCodeInvalidError:
@@ -491,6 +511,7 @@ async def ensure_login(
             password = bot.wait_command(
                 re.compile(r"^/pwd(?:@\w+)?\s*(.*)$"),
                 timeout=code_timeout,
+                parse_digits=False,
             )
 
         if not password and sys.stdin.isatty():
