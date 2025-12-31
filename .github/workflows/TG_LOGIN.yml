@@ -1,0 +1,34 @@
+name: TG_LOGIN
+
+on:
+  workflow_dispatch:
+
+jobs:
+  tg-login:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Login and write TG_SESSION
+        env:
+          TG_API_ID: ${{ secrets.TG_API_ID }}
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
+          TG_PHONE_NUMBER: ${{ secrets.TG_PHONE_NUMBER }}
+          TG_2FA_PASSWORD: ${{ secrets.TG_2FA_PASSWORD }}
+
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_ADMIN_CHAT_ID: ${{ secrets.TG_ADMIN_CHAT_ID }}
+
+          # 用于把 TG_SESSION 写回 Secrets
+          REPO_TOKEN: ${{ secrets.REPO_TOKEN }}
+        run: python auto_SIGN.py --login-only
+

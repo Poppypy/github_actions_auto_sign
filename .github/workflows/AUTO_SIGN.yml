@@ -1,0 +1,41 @@
+name: AUTO_SIGN
+
+on:
+  workflow_dispatch:
+  schedule:
+    # GitHub cron 使用 UTC 时间；下面示例是每天北京时间 12:00（UTC 04:00）
+    - cron: "0 4 * * *"
+
+jobs:
+  auto-sign:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Run AUTO_SIGN
+        env:
+          TG_API_ID: ${{ secrets.TG_API_ID }}
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
+          TG_PHONE_NUMBER: ${{ secrets.TG_PHONE_NUMBER }}
+          TG_SESSION: ${{ secrets.TG_SESSION }}
+          TG_2FA_PASSWORD: ${{ secrets.TG_2FA_PASSWORD }}
+
+          # 登录/通知机器人（用于失败通知；首次登录也会用到）
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_ADMIN_CHAT_ID: ${{ secrets.TG_ADMIN_CHAT_ID }}
+
+          # 签到目标（建议放 Variables）
+          TG_SIGN_TASKS: ${{ vars.TG_SIGN_TASKS != '' && vars.TG_SIGN_TASKS || secrets.TG_SIGN_TASKS }}
+
+          # 可选：随机等待区间，例如 0.5-2
+          SIGN_DELAY_RANGE: ${{ vars.SIGN_DELAY_RANGE }}
+        run: python auto_SIGN.py
