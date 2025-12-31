@@ -202,6 +202,7 @@ class BotInteractor:
         deadline = time.time() + timeout
         last_desc: str = ""
         last_desc_ts = 0.0
+        last_heartbeat = 0.0
 
         while time.time() < deadline:
             try:
@@ -270,6 +271,12 @@ class BotInteractor:
                 raise
             except Exception:
                 pass
+
+            # 心跳日志，帮助排查“没收到验证码”
+            now = time.time()
+            if self.debug_updates and (now - last_heartbeat) > 20:
+                log(f"DEBUG waiting /code ... offset={offset}")
+                last_heartbeat = now
 
             time.sleep(1)
         return None
