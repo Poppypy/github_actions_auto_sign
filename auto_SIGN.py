@@ -104,18 +104,39 @@ class SignTask:
 class BotInteractor:
     """通过 Telegram Bot API 与你交互：发提示、收 /code、收 /pwd。"""
 
-    def __init__(self, token: str, admin_chat_id: str, *, auto_delete_webhook: bool = False):
+    def __init__(
+        self,
+        token: str,
+        admin_chat_id: str,
+        *,
+        auto_delete_webhook: bool = False,
+        debug_updates: bool = False,
+    ):
         self.token = token
-        self.admin_chat_id = str(admin_chat_id)
+        admin_chat_id = str(admin_chat_id).strip()
+        admin_ids_ordered: List[str] = []
+        seen: set[str] = set()
+        for s in re.split(r"[,\s;]+", admin_chat_id):
+            s = s.strip()
+            if not s or s in seen:
+                continue
+            seen.add(s)
+            admin_ids_ordered.append(s)
+        self.admin_ids = set(admin_ids_ordered)
+        if not admin_ids_ordered:
+            raise RuntimeError("TG_ADMIN_CHAT_ID 为空")
+        # 用于 sendMessage 的目标：取第一个
+        self.primary_admin_chat_id = admin_ids_ordered[0]
         self.base = f"https://api.telegram.org/bot{self.token}"
         self.auto_delete_webhook = auto_delete_webhook
+        self.debug_updates = debug_updates
         self._webhook_checked = False
 
     def send(self, text: str) -> None:
         try:
             requests.post(
                 f"{self.base}/sendMessage",
-                data={"chat_id": self.admin_chat_id, "text": text},
+                data={"chat_id": self.primary_admin_chat_id, "text": text},
                 timeout=30,
             )
         except Exception:
@@ -220,10 +241,28 @@ class BotInteractor:
                         or {}
                     )
                     chat = msg.get("chat") or {}
-                    if str(chat.get("id")) != self.admin_chat_id:
-                        continue
+                    chat_id = str(chat.get("id") or "").strip()
+                    from_user = msg.get("from") or {}
+                    from_user_id = str(from_user.get("id") or "").strip()
 
                     text = (msg.get("text") or "").strip()
+                    if self.debug_updates:
+                        redacted = re.sub(r"\d", "*", text)[:120]
+                        log(f"DEBUG update: chat_id={chat_id} from_id={from_user_id} text={redacted!r}")
+
+                    # 兼容两种配置方式：
+                    # - TG_ADMIN_CHAT_ID=你和 bot 私聊的 chat_id（=你的 user_id）
+                    # - TG_ADMIN_CHAT_ID=群 chat_id（负数 -100...）
+                    # 同时也允许：在群里发 /code，但 TG_ADMIN_CHAT_ID 配的是你的 user_id
+                    if chat_id not in self.admin_ids and from_user_id not in self.admin_ids:
+                        # 只对“看起来像命令”的文本做提示，避免泄露其它聊天信息
+                        if text.startswith("/code") or text.startswith("/pwd"):
+                            log(
+                                "收到 /code 或 /pwd，但来源 ID 不匹配："
+                                f"chat_id={chat_id} from_id={from_user_id}（请检查 TG_ADMIN_CHAT_ID）"
+                            )
+                        continue
+
                     m = pattern.match(text)
                     if m:
                         return m.group(1)
@@ -370,7 +409,13 @@ async def ensure_login(
         code = input("请输入 Telegram 登录验证码：").strip()
 
     if not code:
-        raise RuntimeError("未收到验证码 /code，登录失败")
+        raise RuntimeError(
+            "未收到验证码 /code，登录失败。\n"
+            "排查：\n"
+            "1) 确认你是在收到提示的同一个聊天窗口回复（私聊/群）。\n"
+            "2) 检查 TG_ADMIN_CHAT_ID 是否填对：私聊=你的 user_id；群里=群 chat_id（-100...）。\n"
+            "3) 如果 bot 配过 webhook/被占用，设置 TG_DELETE_WEBHOOK=1 再跑 TG_LOGIN。"
+        )
 
     try:
         await client.sign_in(phone_number, code, phone_code_hash=sent.phone_code_hash)
@@ -484,9 +529,15 @@ async def async_main(args: argparse.Namespace) -> int:
     bot_token = (env("TG_BOT_TOKEN") or "").strip()
     admin_chat_id = (env("TG_ADMIN_CHAT_ID") or "").strip()
     auto_delete_webhook = env_bool("TG_DELETE_WEBHOOK", default=False)
+    debug_updates = env_bool("TG_DEBUG_UPDATES", default=False)
     bot: Optional[BotInteractor] = None
     if bot_token and admin_chat_id:
-        bot = BotInteractor(bot_token, admin_chat_id, auto_delete_webhook=auto_delete_webhook)
+        bot = BotInteractor(
+            bot_token,
+            admin_chat_id,
+            auto_delete_webhook=auto_delete_webhook,
+            debug_updates=debug_updates,
+        )
 
     password = (env("TG_2FA_PASSWORD") or "").strip() or None
 

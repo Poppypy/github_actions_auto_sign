@@ -31,6 +31,8 @@ jobs:
           TG_ADMIN_CHAT_ID: ${{ secrets.TG_ADMIN_CHAT_ID }}
           # Optional: set to 1 to auto deleteWebhook (if your bot has webhook or is conflicted)
           TG_DELETE_WEBHOOK: ${{ vars.TG_DELETE_WEBHOOK }}
+          # Optional: set to 1 to print getUpdates debug (redacted)
+          TG_DEBUG_UPDATES: ${{ vars.TG_DEBUG_UPDATES }}
 
           # 用于把 TG_SESSION 写回 Secrets
           REPO_TOKEN: ${{ secrets.REPO_TOKEN }}
