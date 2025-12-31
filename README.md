@@ -71,7 +71,8 @@
 - `TG_ADMIN_CHAT_ID` 既可以填“私聊 chat_id（=你的 user_id）”，也可以填“群 chat_id（-100...）”；也支持多个（逗号/空格/分号分隔）
 - 如果你是在群里和 bot 交互，命令可能会变成：`/code@你的机器人用户名 12345`（脚本已兼容）
  - 如果你回复慢，可以在仓库 Variables 里加 `TG_LOGIN_TIMEOUT=600`（单位秒）
- - 需要排查时可加 `TG_DEBUG_UPDATES=1`（会在 Actions 日志打印 getUpdates 的简要信息，验证码数字会被打码）
+ - 日志默认已开启（敏感数字已打码）。如需关闭，设 `TG_DEBUG_UPDATES=0`
+ - 实在匹配不上，可临时加 `TG_ACCEPT_ANY=1`（不校验聊天 ID，只要收到 /code 就用；跑通后请关闭）
 
 ## 5) 自动签到
 

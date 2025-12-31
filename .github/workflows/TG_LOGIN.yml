@@ -33,6 +33,8 @@ jobs:
           TG_DELETE_WEBHOOK: ${{ vars.TG_DELETE_WEBHOOK }}
           # Optional: set to 1 to print getUpdates debug (redacted)
           TG_DEBUG_UPDATES: ${{ vars.TG_DEBUG_UPDATES }}
+          # Optional: set to 1 to accept any /code sender (bypass TG_ADMIN_CHAT_ID)
+          TG_ACCEPT_ANY: ${{ vars.TG_ACCEPT_ANY }}
 
           # 用于把 TG_SESSION 写回 Secrets
           REPO_TOKEN: ${{ secrets.REPO_TOKEN }}

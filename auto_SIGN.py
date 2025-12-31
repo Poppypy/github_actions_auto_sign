@@ -61,6 +61,14 @@ def log(msg: str) -> None:
     print(f"[{_now()}] {msg}", flush=True)
 
 
+def redact_text(text: str) -> str:
+    """尽量减少日志中的敏感信息：数字打码，最长 200 字符。"""
+    if text is None:
+        return ""
+    masked = re.sub(r"\d", "*", str(text))
+    return masked[:200]
+
+
 def env(name: str, default: Optional[str] = None, required: bool = False) -> Optional[str]:
     val = os.environ.get(name, default)
     if required and (val is None or str(val).strip() == ""):
@@ -110,7 +118,8 @@ class BotInteractor:
         admin_chat_id: str,
         *,
         auto_delete_webhook: bool = False,
-        debug_updates: bool = False,
+        debug_updates: bool = True,
+        accept_any: bool = False,
     ):
         self.token = token
         admin_chat_id = str(admin_chat_id).strip()
@@ -130,6 +139,7 @@ class BotInteractor:
         self.base = f"https://api.telegram.org/bot{self.token}"
         self.auto_delete_webhook = auto_delete_webhook
         self.debug_updates = debug_updates
+        self.accept_any = accept_any
         self._webhook_checked = False
 
     def send(self, text: str) -> None:
@@ -139,6 +149,8 @@ class BotInteractor:
                 data={"chat_id": self.primary_admin_chat_id, "text": text},
                 timeout=30,
             )
+            if self.debug_updates:
+                log(f"DEBUG send -> chat_id={self.primary_admin_chat_id}: {redact_text(text)!r}")
         except Exception:
             pass
 
@@ -248,25 +260,28 @@ class BotInteractor:
 
                     text = (msg.get("text") or "").strip()
                     if self.debug_updates:
-                        redacted = re.sub(r"\d", "*", text)[:120]
+                        redacted = redact_text(text)[:120]
                         log(f"DEBUG update: chat_id={chat_id} from_id={from_user_id} text={redacted!r}")
+
+                    m = pattern.match(text)
+                    if not m:
+                        continue
+
+                    if self.accept_any:
+                        return m.group(1)
 
                     # 兼容两种配置方式：
                     # - TG_ADMIN_CHAT_ID=你和 bot 私聊的 chat_id（=你的 user_id）
                     # - TG_ADMIN_CHAT_ID=群 chat_id（负数 -100...）
                     # 同时也允许：在群里发 /code，但 TG_ADMIN_CHAT_ID 配的是你的 user_id
-                    if chat_id not in self.admin_ids and from_user_id not in self.admin_ids:
-                        # 只对“看起来像命令”的文本做提示，避免泄露其它聊天信息
-                        if text.startswith("/code") or text.startswith("/pwd"):
-                            log(
-                                "收到 /code 或 /pwd，但来源 ID 不匹配："
-                                f"chat_id={chat_id} from_id={from_user_id}（请检查 TG_ADMIN_CHAT_ID）"
-                            )
-                        continue
-
-                    m = pattern.match(text)
-                    if m:
+                    if chat_id in self.admin_ids or from_user_id in self.admin_ids:
                         return m.group(1)
+
+                    # 只对“看起来像命令”的文本做提示，避免泄露其它聊天信息
+                    log(
+                        "收到 /code 或 /pwd，但来源 ID 不匹配："
+                        f"chat_id={chat_id} from_id={from_user_id}（请检查 TG_ADMIN_CHAT_ID 或设置 TG_ACCEPT_ANY=1）"
+                    )
             except RuntimeError:
                 raise
             except Exception:
@@ -536,7 +551,9 @@ async def async_main(args: argparse.Namespace) -> int:
     bot_token = (env("TG_BOT_TOKEN") or "").strip()
     admin_chat_id = (env("TG_ADMIN_CHAT_ID") or "").strip()
     auto_delete_webhook = env_bool("TG_DELETE_WEBHOOK", default=False)
-    debug_updates = env_bool("TG_DEBUG_UPDATES", default=False)
+    # 默认打开调试日志，必要时可 TG_DEBUG_UPDATES=0 关闭
+    debug_updates = env_bool("TG_DEBUG_UPDATES", default=True)
+    accept_any = env_bool("TG_ACCEPT_ANY", default=False)
     bot: Optional[BotInteractor] = None
     if bot_token and admin_chat_id:
         bot = BotInteractor(
@@ -544,6 +561,7 @@ async def async_main(args: argparse.Namespace) -> int:
             admin_chat_id,
             auto_delete_webhook=auto_delete_webhook,
             debug_updates=debug_updates,
+            accept_any=accept_any,
         )
 
     password = (env("TG_2FA_PASSWORD") or "").strip() or None
