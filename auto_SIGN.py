@@ -69,6 +69,20 @@ def redact_text(text: str) -> str:
     return masked[:200]
 
 
+def redact_id(value: str) -> str:
+    """ID 仅展示后 4 位（其余打码），避免把 chat_id/user_id 直接打到日志里。"""
+    s = str(value or "").strip()
+    if not s:
+        return ""
+    sign = "-" if s.startswith("-") else ""
+    digits = re.sub(r"\D", "", s)
+    if not digits:
+        return "***"
+    if len(digits) <= 4:
+        return sign + ("*" * len(digits))
+    return sign + ("*" * (len(digits) - 4)) + digits[-4:]
+
+
 def env(name: str, default: Optional[str] = None, required: bool = False) -> Optional[str]:
     val = os.environ.get(name, default)
     if required and (val is None or str(val).strip() == ""):
@@ -78,7 +92,7 @@ def env(name: str, default: Optional[str] = None, required: bool = False) -> Opt
 
 def env_bool(name: str, default: bool = False) -> bool:
     raw = os.environ.get(name)
-    if raw is None:
+    if raw is None or raw.strip() == "":
         return default
     return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
 
@@ -150,7 +164,7 @@ class BotInteractor:
                 timeout=30,
             )
             if self.debug_updates:
-                log(f"DEBUG send -> chat_id={self.primary_admin_chat_id}: {redact_text(text)!r}")
+                log(f"DEBUG send -> chat_id={redact_id(self.primary_admin_chat_id)}: {redact_text(text)!r}")
         except Exception:
             pass
 
@@ -261,7 +275,12 @@ class BotInteractor:
                     text = (msg.get("text") or "").strip()
                     if self.debug_updates:
                         redacted = redact_text(text)[:120]
-                        log(f"DEBUG update: chat_id={chat_id} from_id={from_user_id} text={redacted!r}")
+                        log(
+                            "DEBUG update: "
+                            f"chat_id={redact_id(chat_id)} "
+                            f"from_id={redact_id(from_user_id)} "
+                            f"text={redacted!r}"
+                        )
 
                     m = pattern.match(text)
                     if not m:
@@ -280,7 +299,8 @@ class BotInteractor:
                     # 只对“看起来像命令”的文本做提示，避免泄露其它聊天信息
                     log(
                         "收到 /code 或 /pwd，但来源 ID 不匹配："
-                        f"chat_id={chat_id} from_id={from_user_id}（请检查 TG_ADMIN_CHAT_ID 或设置 TG_ACCEPT_ANY=1）"
+                        f"chat_id={redact_id(chat_id)} from_id={redact_id(from_user_id)}"
+                        "（请检查 TG_ADMIN_CHAT_ID 或设置 TG_ACCEPT_ANY=1）"
                     )
             except RuntimeError:
                 raise
@@ -412,7 +432,9 @@ async def ensure_login(
         raise RuntimeError("首次登录需要 TG_BOT_TOKEN + TG_ADMIN_CHAT_ID（Actions 环境无交互输入）")
 
     log("未检测到授权，开始登录流程…")
+    log("正在向 Telegram 请求登录验证码（send_code_request）…")
     sent = await client.send_code_request(phone_number)
+    log("验证码已发送（请在 Telegram App/SMS 查看），随后把验证码发给机器人：/code 12345")
 
     code: Optional[str] = None
     if bot is not None:
@@ -422,6 +444,7 @@ async def ensure_login(
             f"请在 {code_timeout}s 内回复：/code 12345\n"
             "（只接受来自 TG_ADMIN_CHAT_ID 的消息）"
         )
+        log(f"已发送提示到 Telegram，等待 /code（最长 {code_timeout}s）…")
         code = bot.wait_command(
             re.compile(r"^/code(?:@\\w+)?\\s+(\\d{5,8})$"),
             timeout=code_timeout,
@@ -446,6 +469,7 @@ async def ensure_login(
     except SessionPasswordNeededError:
         if not password and bot is not None:
             bot.send("检测到开启了两步验证(2FA)。请回复：/pwd 你的密码")
+            log(f"等待 /pwd（最长 {code_timeout}s）…")
             password = bot.wait_command(
                 re.compile(r"^/pwd(?:@\\w+)?\\s+(.+)$"),
                 timeout=code_timeout,
@@ -497,7 +521,8 @@ async def run_sign(client: TelegramClient, tasks: List[SignTask], delay_range: T
             entity = await client.get_input_entity(target)
             await client.send_message(entity, task.text)
             ok += 1
-            log(f"[{idx}/{len(tasks)}] 已发送 -> {task.chat}: {task.text[:60]!r}")
+            chat_show = redact_id(task.chat) if re.fullmatch(r"-?\d+", task.chat) else task.chat
+            log(f"[{idx}/{len(tasks)}] 已发送 -> {chat_show}: {redact_text(task.text)[:60]!r}")
         except FloodWaitError as e:
             wait_s = int(getattr(e, "seconds", 0) or 0)
             log(f"[{idx}/{len(tasks)}] 触发 FloodWait，等待 {wait_s}s 后重试…")
@@ -509,13 +534,16 @@ async def run_sign(client: TelegramClient, tasks: List[SignTask], delay_range: T
                 entity = await client.get_input_entity(target2)
                 await client.send_message(entity, task.text)
                 ok += 1
-                log(f"[{idx}/{len(tasks)}] 重试成功 -> {task.chat}")
+                chat_show = redact_id(task.chat) if re.fullmatch(r"-?\d+", task.chat) else task.chat
+                log(f"[{idx}/{len(tasks)}] 重试成功 -> {chat_show}")
             except Exception as e2:
                 fail += 1
-                log(f"[{idx}/{len(tasks)}] 重试失败 -> {task.chat}: {e2}")
+                chat_show = redact_id(task.chat) if re.fullmatch(r"-?\d+", task.chat) else task.chat
+                log(f"[{idx}/{len(tasks)}] 重试失败 -> {chat_show}: {e2}")
         except Exception as e:
             fail += 1
-            log(f"[{idx}/{len(tasks)}] 发送失败 -> {task.chat}: {e}")
+            chat_show = redact_id(task.chat) if re.fullmatch(r"-?\d+", task.chat) else task.chat
+            log(f"[{idx}/{len(tasks)}] 发送失败 -> {chat_show}: {e}")
 
         if idx != len(tasks):
             sleep_s = random.uniform(delay_range[0], delay_range[1])
