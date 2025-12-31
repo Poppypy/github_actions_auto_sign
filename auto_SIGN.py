@@ -286,15 +286,30 @@ class BotInteractor:
                     if not m:
                         continue
 
+                    # 允许验证码里带空格/分隔符/不可见字符：提取所有数字后再判断长度
+                    payload = m.group(1)
+                    digits_all = "".join(re.findall(r"\d", payload))
+                    if 5 <= len(digits_all) <= 8:
+                        payload = digits_all
+                    else:
+                        # 再尝试从 payload 内找 5-8 位连续数字（比如消息里夹了其它数字）
+                        groups = re.findall(r"\d{5,8}", payload)
+                        if groups:
+                            payload = groups[-1]
+                        else:
+                            if self.debug_updates:
+                                log(f"DEBUG /code payload 无法解析为 5-8 位数字：{redact_text(payload)!r}")
+                            continue
+
                     if self.accept_any:
-                        return m.group(1)
+                        return payload
 
                     # 兼容两种配置方式：
                     # - TG_ADMIN_CHAT_ID=你和 bot 私聊的 chat_id（=你的 user_id）
                     # - TG_ADMIN_CHAT_ID=群 chat_id（负数 -100...）
                     # 同时也允许：在群里发 /code，但 TG_ADMIN_CHAT_ID 配的是你的 user_id
                     if chat_id in self.admin_ids or from_user_id in self.admin_ids:
-                        return m.group(1)
+                        return payload
 
                     # 只对“看起来像命令”的文本做提示，避免泄露其它聊天信息
                     log(
@@ -446,7 +461,8 @@ async def ensure_login(
         )
         log(f"已发送提示到 Telegram，等待 /code（最长 {code_timeout}s）…")
         code = bot.wait_command(
-            re.compile(r"^/code(?:@\\w+)?\\s+(\\d{5,8})$"),
+            # group(1) 会进一步提取数字（兼容 123 456 / 123-456 等格式）
+            re.compile(r"^/code(?:@\\w+)?\\s+(.+)$"),
             timeout=code_timeout,
             offset=offset,
         )
@@ -462,6 +478,7 @@ async def ensure_login(
             "3) 如果 bot 配过 webhook/被占用，设置 TG_DELETE_WEBHOOK=1 再跑 TG_LOGIN。"
         )
 
+    log(f"已收到 /code：{redact_text(code)!r}，开始 sign_in…")
     try:
         await client.sign_in(phone_number, code, phone_code_hash=sent.phone_code_hash)
     except PhoneCodeInvalidError:
