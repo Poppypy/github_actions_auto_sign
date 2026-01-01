@@ -343,6 +343,8 @@ class BotInteractor:
                 for upd in data.get("result", []):
                     update_id, message_id, chat_id, from_user_id, text = self._parse_update_message(upd)
                     offset = update_id + 1
+                    if not chat_id:
+                        continue
 
                     is_admin = self._from_admin(chat_id, from_user_id)
                     if self.debug_updates:
@@ -363,6 +365,14 @@ class BotInteractor:
                                 "收到疑似验证码消息，但来源 ID 不匹配："
                                 f"chat_id={redact_id(chat_id)} from_id={redact_id(from_user_id)}"
                                 "（请检查 TG_ADMIN_CHAT_ID，或临时设置 TG_ACCEPT_ANY=1 排查）"
+                            )
+                            self.send_to(
+                                chat_id,
+                                "收到消息，但未通过 TG_ADMIN_CHAT_ID 校验，已忽略。\n"
+                                f"chat_id={chat_id}\n"
+                                f"from_id={from_user_id}\n"
+                                "请检查 TG_ADMIN_CHAT_ID 配置，或临时设置 TG_ACCEPT_ANY=1 排查。",
+                                reply_to_message_id=message_id,
                             )
                         continue
 
@@ -432,6 +442,8 @@ class BotInteractor:
                 for upd in data.get("result", []):
                     update_id, message_id, chat_id, from_user_id, text = self._parse_update_message(upd)
                     offset = update_id + 1
+                    if not chat_id:
+                        continue
 
                     is_admin = self._from_admin(chat_id, from_user_id)
                     if self.debug_updates:
@@ -446,6 +458,15 @@ class BotInteractor:
                         )
 
                     if not is_admin:
+                        if text.strip().lower().startswith("/pwd"):
+                            self.send_to(
+                                chat_id,
+                                "收到 /pwd，但未通过 TG_ADMIN_CHAT_ID 校验，已忽略。\n"
+                                f"chat_id={chat_id}\n"
+                                f"from_id={from_user_id}\n"
+                                "请检查 TG_ADMIN_CHAT_ID 配置，或临时设置 TG_ACCEPT_ANY=1 排查。",
+                                reply_to_message_id=message_id,
+                            )
                         continue
 
                     t = normalize_msg(text)
