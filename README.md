@@ -13,7 +13,7 @@
    - `TG_API_ID`
    - `TG_API_HASH`
 <details>
-![alt text](png/image.png)
+![alt text](./png/image.png)
 </details>
 
 2. Telegram 手机号：`TG_PHONE_NUMBER`（国际格式，例如 `+86...`）
