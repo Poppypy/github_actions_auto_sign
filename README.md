@@ -141,3 +141,9 @@
 
 可选变量：
 - `SIGN_DELAY_RANGE`：每条消息之间随机等待（默认 `1-3` 秒），例如 `0.5-2`
+
+
+
+## 效果图
+
+<img src="png/image11.png" alt="效果" width="300">
