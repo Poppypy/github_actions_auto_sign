@@ -61,7 +61,7 @@
 
 1. 先确保你已经配置了 `REPO_TOKEN`
 2. 在 Actions 页面手动运行工作流：`TG_LOGIN`
-3. 机器人会提示你发送：`/code 12345`
+3. 机器人会提示你发送：直接发送验证码数字（例如 `12345`），或发送：`/code 12345`
 4. 成功后会自动写回：Secrets → `TG_SESSION`
 
 常见问题：我已经发了 `/code 12345`，但工作流提示“未收到验证码”
@@ -70,9 +70,9 @@
   - 或者：在仓库 Variables 里加 `TG_DELETE_WEBHOOK=1`，再手动跑一次 `TG_LOGIN`（脚本会尝试自动 `deleteWebhook`）
 - `TG_ADMIN_CHAT_ID` 既可以填“私聊 chat_id（=你的 user_id）”，也可以填“群 chat_id（-100...）”；也支持多个（逗号/空格/分号分隔）
 - 如果你是在群里和 bot 交互，命令可能会变成：`/code@你的机器人用户名 12345`（脚本已兼容）
- - 如果你回复慢，可以在仓库 Variables 里加 `TG_LOGIN_TIMEOUT=600`（单位秒）
- - 日志默认已开启（敏感数字已打码）。如需关闭，设 `TG_DEBUG_UPDATES=0`
- - 实在匹配不上，可临时加 `TG_ACCEPT_ANY=1`（不校验聊天 ID，只要收到 /code 就用；跑通后请关闭）
+- 如果你回复慢，可以在仓库 Variables 里加 `TG_LOGIN_TIMEOUT=600`（单位秒）
+- 日志默认已开启（验证码会明文打印；`/pwd` 会自动隐藏密码）。如需关闭，设 `TG_DEBUG_UPDATES=0`
+- 实在匹配不上，可临时加 `TG_ACCEPT_ANY=1`（不校验聊天 ID，只要收到 5~8 位数字验证码就用；跑通后请关闭）
 
 ## 5) 自动签到
 

@@ -20,6 +20,7 @@ import random
 import re
 import sys
 import time
+import traceback
 import unicodedata
 from dataclasses import dataclass
 from typing import Any, List, Optional, Tuple
@@ -40,25 +41,18 @@ def log(msg: str) -> None:
 
 
 def redact_text(text: str) -> str:
-    """尽量减少日志中的敏感信息：数字打码，最长 200 字符。"""
+    """日志文本预览：不打码，仅截断；/pwd 仅保留命令避免泄露密码。"""
     if text is None:
         return ""
-    masked = re.sub(r"\d", "*", str(text))
-    return masked[:200]
+    s = str(text)
+    if re.match(r"^\s*/pwd(?:@\w+)?\b", s, flags=re.I):
+        return "/pwd [REDACTED]"
+    return s[:400]
 
 
 def redact_id(value: str) -> str:
-    """ID 仅展示后 4 位（其余打码），避免把 chat_id/user_id 直接打到日志里。"""
-    s = str(value or "").strip()
-    if not s:
-        return ""
-    sign = "-" if s.startswith("-") else ""
-    digits = re.sub(r"\D", "", s)
-    if not digits:
-        return "***"
-    if len(digits) <= 4:
-        return sign + ("*" * len(digits))
-    return sign + ("*" * (len(digits) - 4)) + digits[-4:]
+    """日志展示用：直接输出完整 ID（便于排查 TG_ADMIN_CHAT_ID 配置）。"""
+    return str(value or "").strip()
 
 
 def digits_to_ascii(text: str) -> str:
@@ -174,17 +168,27 @@ class BotInteractor:
         self.accept_any = accept_any
         self._webhook_checked = False
 
-    def send(self, text: str) -> None:
+    def send_to(self, chat_id: str, text: str, *, reply_to_message_id: Optional[int] = None) -> None:
+        """向指定 chat 发送消息。"""
         try:
-            requests.post(
-                f"{self.base}/sendMessage",
-                data={"chat_id": self.primary_admin_chat_id, "text": text},
-                timeout=30,
-            )
+            payload: dict[str, Any] = {"chat_id": chat_id, "text": text}
+            if reply_to_message_id is not None:
+                payload["reply_to_message_id"] = int(reply_to_message_id)
+            r = requests.post(f"{self.base}/sendMessage", data=payload, timeout=30)
             if self.debug_updates:
-                log(f"DEBUG send -> chat_id={redact_id(self.primary_admin_chat_id)}: {redact_text(text)!r}")
-        except Exception:
-            pass
+                log(
+                    "DEBUG sendMessage: "
+                    f"chat_id={redact_id(chat_id)} "
+                    f"reply_to={reply_to_message_id} "
+                    f"status={r.status_code} "
+                    f"text={redact_text(text)!r}"
+                )
+        except Exception as e:
+            if self.debug_updates:
+                log(f"DEBUG sendMessage exception: {type(e).__name__}: {e}")
+
+    def send(self, text: str) -> None:
+        self.send_to(self.primary_admin_chat_id, text)
 
     def _ensure_polling_ready(self) -> None:
         """
@@ -225,9 +229,15 @@ class BotInteractor:
             r = requests.get(f"{self.base}/getUpdates", params={"timeout": 0}, timeout=15)
             data = r.json()
             if data.get("ok") and data.get("result"):
-                return int(data["result"][-1]["update_id"]) + 1
-        except Exception:
-            pass
+                next_offset = int(data["result"][-1]["update_id"]) + 1
+                if self.debug_updates:
+                    log(f"DEBUG flush_offset -> next_offset={next_offset} (dropped={len(data['result'])})")
+                return next_offset
+        except Exception as e:
+            if self.debug_updates:
+                log(f"DEBUG flush_offset exception: {type(e).__name__}: {e}")
+        if self.debug_updates:
+            log("DEBUG flush_offset -> next_offset=0 (no pending updates)")
         return 0
 
     def _from_admin(self, chat_id: str, from_user_id: str) -> bool:
@@ -278,6 +288,28 @@ class BotInteractor:
 
         return None
 
+    def _parse_update_message(self, upd: dict) -> tuple[int, Optional[int], str, str, str]:
+        """从 getUpdates 的单条 update 中提取关键信息。"""
+        update_id = int(upd.get("update_id") or 0)
+        msg = (
+            upd.get("message")
+            or upd.get("edited_message")
+            or upd.get("channel_post")
+            or upd.get("edited_channel_post")
+            or {}
+        )
+        message_id = msg.get("message_id")
+        try:
+            message_id = int(message_id) if message_id is not None else None
+        except Exception:
+            message_id = None
+        chat = msg.get("chat") or {}
+        chat_id = str(chat.get("id") or "").strip()
+        from_user = msg.get("from") or {}
+        from_user_id = str(from_user.get("id") or "").strip()
+        text = (msg.get("text") or msg.get("caption") or "").strip()
+        return update_id, message_id, chat_id, from_user_id, text
+
     def wait_login_code(self, timeout: int, *, offset: Optional[int] = None) -> Optional[str]:
         """等待验证码（5~8 位），只接受来自 TG_ADMIN_CHAT_ID 的消息。"""
         self._ensure_polling_ready()
@@ -309,29 +341,22 @@ class BotInteractor:
                     continue
 
                 for upd in data.get("result", []):
-                    offset = int(upd["update_id"]) + 1
-                    msg = (
-                        upd.get("message")
-                        or upd.get("edited_message")
-                        or upd.get("channel_post")
-                        or upd.get("edited_channel_post")
-                        or {}
-                    )
-                    chat = msg.get("chat") or {}
-                    chat_id = str(chat.get("id") or "").strip()
-                    from_user = msg.get("from") or {}
-                    from_user_id = str(from_user.get("id") or "").strip()
-                    text = (msg.get("text") or "").strip()
+                    update_id, message_id, chat_id, from_user_id, text = self._parse_update_message(upd)
+                    offset = update_id + 1
 
+                    is_admin = self._from_admin(chat_id, from_user_id)
                     if self.debug_updates:
                         log(
                             "DEBUG update: "
+                            f"update_id={update_id} "
+                            f"message_id={message_id} "
                             f"chat_id={redact_id(chat_id)} "
                             f"from_id={redact_id(from_user_id)} "
+                            f"admin={is_admin} "
                             f"text={redact_text(text)!r}"
                         )
 
-                    if not self._from_admin(chat_id, from_user_id):
+                    if not is_admin:
                         # 如果看起来像验证码/命令，给个提示，方便排查 TG_ADMIN_CHAT_ID 配置
                         if re.search(r"\d", text) or text.strip().startswith("/code"):
                             log(
@@ -342,18 +367,40 @@ class BotInteractor:
                         continue
 
                     code = self._extract_login_code(text)
+                    if self.debug_updates:
+                        norm = normalize_msg(text)
+                        groups = re.findall(r"\d+", norm)
+                        groups_ascii = [digits_to_ascii(g) for g in groups if g]
+                        merged = "".join(groups_ascii)
+                        log(
+                            "DEBUG parse_code: "
+                            f"norm={redact_text(norm)!r} "
+                            f"groups={groups_ascii!r} "
+                            f"merged={merged!r} "
+                            f"code={code!r}"
+                        )
                     if code:
+                        self.send_to(
+                            chat_id,
+                            f"✅ 收到验证码：{code}，正在继续登录…",
+                            reply_to_message_id=message_id,
+                        )
                         return code
 
-                    if self.debug_updates:
-                        # 明确告诉你“收到了，但没解析出来”
-                        norm = normalize_msg(text)
-                        log(f"DEBUG 收到消息但无法解析出 5-8 位验证码：{redact_text(norm)!r}")
+                    # 明确告诉你“收到了，但没解析出来”，并提示正确格式
+                    self.send_to(
+                        chat_id,
+                        "⚠️ 已收到消息，但未解析出 5~8 位数字验证码。\n"
+                        "请直接发送纯数字（例如 12345 / 123456），或发送：/code 12345",
+                        reply_to_message_id=message_id,
+                    )
 
             except RuntimeError:
                 raise
-            except Exception:
-                pass
+            except Exception as e:
+                if self.debug_updates:
+                    log(f"DEBUG wait_login_code exception: {type(e).__name__}: {e}")
+                    log(traceback.format_exc(limit=2).strip())
 
             now = time.time()
             if self.debug_updates and (now - last_heartbeat) > 20:
@@ -383,23 +430,22 @@ class BotInteractor:
                     continue
 
                 for upd in data.get("result", []):
-                    offset = int(upd["update_id"]) + 1
-                    msg = upd.get("message") or upd.get("edited_message") or {}
-                    chat = msg.get("chat") or {}
-                    chat_id = str(chat.get("id") or "").strip()
-                    from_user = msg.get("from") or {}
-                    from_user_id = str(from_user.get("id") or "").strip()
-                    text = (msg.get("text") or "").strip()
+                    update_id, message_id, chat_id, from_user_id, text = self._parse_update_message(upd)
+                    offset = update_id + 1
 
+                    is_admin = self._from_admin(chat_id, from_user_id)
                     if self.debug_updates:
                         log(
                             "DEBUG update: "
+                            f"update_id={update_id} "
+                            f"message_id={message_id} "
                             f"chat_id={redact_id(chat_id)} "
                             f"from_id={redact_id(from_user_id)} "
+                            f"admin={is_admin} "
                             f"text={redact_text(text)!r}"
                         )
 
-                    if not self._from_admin(chat_id, from_user_id):
+                    if not is_admin:
                         continue
 
                     t = normalize_msg(text)
@@ -407,9 +453,22 @@ class BotInteractor:
                     if m:
                         pwd = (m.group(1) or "").strip()
                         if pwd:
+                            self.send_to(
+                                chat_id,
+                                "✅ 已收到 /pwd，正在继续登录…",
+                                reply_to_message_id=message_id,
+                            )
                             return pwd
+                    # 不是 /pwd，给提示（避免用户发了密码但命令格式不对）
+                    self.send_to(
+                        chat_id,
+                        "⚠️ 需要两步验证(2FA)密码。请按格式发送：/pwd 你的密码",
+                        reply_to_message_id=message_id,
+                    )
             except Exception:
-                pass
+                if self.debug_updates:
+                    log("DEBUG wait_password exception")
+                    log(traceback.format_exc(limit=2).strip())
 
             time.sleep(1)
 
@@ -553,7 +612,7 @@ async def ensure_login(
             "4) 可临时设置 TG_ACCEPT_ANY=1 验证是否是 ID 过滤导致。"
         )
 
-    log(f"已收到验证码：{redact_text(code)!r}，开始 sign_in…")
+    log(f"已收到验证码：{code!r}，开始 sign_in…")
     try:
         await client.sign_in(phone_number, code, phone_code_hash=sent.phone_code_hash)
     except PhoneCodeInvalidError:
@@ -609,8 +668,8 @@ async def run_sign(client: TelegramClient, tasks: List[SignTask], delay_range: T
             entity = await client.get_input_entity(target)
             await client.send_message(entity, task.text)
             ok += 1
-            chat_show = redact_id(task.chat) if re.fullmatch(r"-?\d+", task.chat) else task.chat
-            log(f"[{idx}/{len(tasks)}] 已发送 -> {chat_show}: {redact_text(task.text)[:60]!r}")
+            chat_show = task.chat
+            log(f"[{idx}/{len(tasks)}] 已发送 -> {chat_show}: {redact_text(task.text)[:120]!r}")
         except FloodWaitError as e:
             wait_s = int(getattr(e, "seconds", 0) or 0)
             log(f"[{idx}/{len(tasks)}] 触发 FloodWait，等待 {wait_s}s 后重试…")
@@ -622,15 +681,15 @@ async def run_sign(client: TelegramClient, tasks: List[SignTask], delay_range: T
                 entity = await client.get_input_entity(target2)
                 await client.send_message(entity, task.text)
                 ok += 1
-                chat_show = redact_id(task.chat) if re.fullmatch(r"-?\d+", task.chat) else task.chat
+                chat_show = task.chat
                 log(f"[{idx}/{len(tasks)}] 重试成功 -> {chat_show}")
             except Exception as e2:
                 fail += 1
-                chat_show = redact_id(task.chat) if re.fullmatch(r"-?\d+", task.chat) else task.chat
+                chat_show = task.chat
                 log(f"[{idx}/{len(tasks)}] 重试失败 -> {chat_show}: {e2}")
         except Exception as e:
             fail += 1
-            chat_show = redact_id(task.chat) if re.fullmatch(r"-?\d+", task.chat) else task.chat
+            chat_show = task.chat
             log(f"[{idx}/{len(tasks)}] 发送失败 -> {chat_show}: {e}")
 
         if idx != len(tasks):

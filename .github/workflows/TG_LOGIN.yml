@@ -31,7 +31,7 @@ jobs:
           TG_ADMIN_CHAT_ID: ${{ secrets.TG_ADMIN_CHAT_ID }}
           # Optional: set to 1 to auto deleteWebhook (if your bot has webhook or is conflicted)
           TG_DELETE_WEBHOOK: ${{ vars.TG_DELETE_WEBHOOK }}
-          # Optional: set to 1 to print getUpdates debug (redacted)
+          # Optional: set to 1 to print getUpdates debug (plain; /pwd is redacted)
           TG_DEBUG_UPDATES: ${{ vars.TG_DEBUG_UPDATES }}
           # Optional: set to 1 to accept any /code sender (bypass TG_ADMIN_CHAT_ID)
           TG_ACCEPT_ANY: ${{ vars.TG_ACCEPT_ANY }}
