@@ -43,6 +43,7 @@ import random
 import re
 import sys
 import time
+import unicodedata
 from dataclasses import dataclass
 from typing import Any, List, Optional, Tuple
 
@@ -81,6 +82,22 @@ def redact_id(value: str) -> str:
     if len(digits) <= 4:
         return sign + ("*" * len(digits))
     return sign + ("*" * (len(digits) - 4)) + digits[-4:]
+
+
+def digits_to_ascii(text: str) -> str:
+    """
+    提取 text 中的所有数字并规范化为 ASCII '0'-'9'。
+
+    说明：用户可能会发送全角数字（１２３４５）或其它 Unicode 数字字符，
+    Telethon 登录验证码最终需要普通数字字符串。
+    """
+    out: List[str] = []
+    for ch in re.findall(r"\d", str(text)):
+        try:
+            out.append(str(unicodedata.digit(ch)))
+        except Exception:
+            out.append(ch)
+    return "".join(out)
 
 
 def env(name: str, default: Optional[str] = None, required: bool = False) -> Optional[str]:
@@ -308,12 +325,12 @@ class BotInteractor:
 
                     if parse_digits:
                         # 允许验证码里带空格/分隔符/不可见字符：提取所有数字后再判断长度
-                        digits_all = "".join(re.findall(r"\d", payload))
+                        digits_all = digits_to_ascii(payload)
                         if 5 <= len(digits_all) <= 8:
                             payload = digits_all
                         else:
                             # 再尝试从 payload 内找 5-8 位连续数字（比如消息里夹了其它数字）
-                            groups = re.findall(r"\d{5,8}", payload)
+                            groups = [digits_to_ascii(g) for g in re.findall(r"\d{5,8}", payload)]
                             if groups:
                                 payload = groups[-1]
                             else:
@@ -483,7 +500,7 @@ async def ensure_login(
         code = bot.wait_command(
             # group(1) 会进一步提取数字（兼容 123456 / 123 456 / 123-456 / "123456" 等格式）
             # 这里用 \s* 而不是 \s+，以兼容 Telegram 里可能出现的“不可见分隔符”
-            re.compile(r"^\s*(?:/code(?:@\w+)?\s*)?([0-9][0-9\s-]{4,15})\s*$"),
+            re.compile(r"^\s*(?:/code(?:@\w+)?\s*)?[\"'“”]?(\d[\d\s-]{4,15})[\"'“”]?\s*$"),
             timeout=code_timeout,
             offset=offset,
         )
