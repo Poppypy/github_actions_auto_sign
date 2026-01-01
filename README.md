@@ -9,6 +9,11 @@
 
 ## 1) 需要准备什么
 
+
+先“fork”本仓库
+
+
+
 1. 在 `https://my.telegram.org` 申请：
    - `TG_API_ID`
    - `TG_API_HASH`
