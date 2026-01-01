@@ -30,6 +30,8 @@
 第四步 登录成功后  点击：API development tools
 
 <img src="png/image4.png" alt="登录" width="300">
+
+
 第五步 这时候你会进入一个页面填写：App title  和  Short name   就可以创建一个应用 ID 和 HASH  最终得到图下图
 
 在输入：App title  和  Short name  创建应用时好像很容易报错或失败，请尝试输入不同的 Short name 或者换干净IP多试几次才可以成功
