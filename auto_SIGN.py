@@ -3,34 +3,11 @@
 """
 Telegram 自动签到（GitHub Actions 友好版）
 
-功能：
-- 使用 Telethon 以“用户号”给多个 chat/bot 发送签到消息
-- 配置全部来自 GitHub Secrets / Variables（环境变量）
-- 首次无 TG_SESSION 时：通过 Telegram 机器人交互收验证码（/code 12345）
-  可选：用 REPO_TOKEN 自动写回 TG_SESSION 到 GitHub Secrets，后续无需再登录
-
-环境变量（建议放到 GitHub Secrets / Variables）：
-必需（用户号登录）：
-- TG_API_ID
-- TG_API_HASH
-- TG_PHONE_NUMBER
-
-必需（发送签到目标）：
-- TG_SIGN_TASKS：JSON（推荐）或 文本列表
-
-可选（免登录）：
-- TG_SESSION：Telethon StringSession 字符串
-
-可选（首次登录机器人交互）：
-- TG_BOT_TOKEN：用于交互的 Telegram Bot Token
-- TG_ADMIN_CHAT_ID：你与机器人对话的 chat_id（只接受该 chat 发来的 /code、/pwd）
-
-可选（两步验证 2FA）：
-- TG_2FA_PASSWORD：如果没配，会要求你在机器人里发 /pwd xxxxx
-
-可选（自动写回 Secret）：
-- REPO_TOKEN：GitHub PAT（需要能写 Actions secrets）
-  脚本会尝试把新生成的 TG_SESSION 写回到仓库 Secrets（名称 TG_SESSION）
+修复点（本次重点）：
+- 解决“发了 /code 验证码但脚本不往下走”的问题：
+  1) Telegram 消息可能包含零宽字符/方向符/特殊空格，导致严格正则 match 失败
+  2) /code@BotName 12345、"123 45"、"123-45" 等格式需要更鲁棒的解析
+- 现在会对收到的消息做 NFKC 归一化 + 清理零宽字符，然后从文本中提取 5~8 位数字作为验证码
 """
 
 from __future__ import annotations
@@ -87,9 +64,7 @@ def redact_id(value: str) -> str:
 def digits_to_ascii(text: str) -> str:
     """
     提取 text 中的所有数字并规范化为 ASCII '0'-'9'。
-
-    说明：用户可能会发送全角数字（１２３４５）或其它 Unicode 数字字符，
-    Telethon 登录验证码最终需要普通数字字符串。
+    兼容全角数字/其它 Unicode 数字字符。
     """
     out: List[str] = []
     for ch in re.findall(r"\d", str(text)):
@@ -98,6 +73,33 @@ def digits_to_ascii(text: str) -> str:
         except Exception:
             out.append(ch)
     return "".join(out)
+
+
+# 常见“不可见字符/方向控制符/零宽字符”
+_ZERO_WIDTH_CHARS = [
+    "\u200b",  # ZERO WIDTH SPACE
+    "\u200c",  # ZERO WIDTH NON-JOINER
+    "\u200d",  # ZERO WIDTH JOINER
+    "\u200e",  # LRM
+    "\u200f",  # RLM
+    "\u202a", "\u202b", "\u202c", "\u202d", "\u202e",  # bidi controls
+    "\ufeff",  # BOM / ZERO WIDTH NO-BREAK SPACE
+]
+_ZERO_WIDTH_TRANSLATE = {ord(ch): None for ch in _ZERO_WIDTH_CHARS}
+
+
+def normalize_msg(text: str) -> str:
+    """
+    对 Telegram 消息做归一化，避免因为不可见字符导致正则/解析失败。
+    - NFKC：把全角数字/全角空格等归一化
+    - 删除零宽/方向字符
+    - 替换不间断空格
+    """
+    t = text or ""
+    t = unicodedata.normalize("NFKC", t)
+    t = t.translate(_ZERO_WIDTH_TRANSLATE)
+    t = t.replace("\u00a0", " ")
+    return t.strip()
 
 
 def env(name: str, default: Optional[str] = None, required: bool = False) -> Optional[str]:
@@ -141,7 +143,7 @@ class SignTask:
 
 
 class BotInteractor:
-    """通过 Telegram Bot API 与你交互：发提示、收 /code、收 /pwd。"""
+    """通过 Telegram Bot API 与你交互：发提示、收验证码、收 /pwd。"""
 
     def __init__(
         self,
@@ -165,7 +167,6 @@ class BotInteractor:
         self.admin_ids = set(admin_ids_ordered)
         if not admin_ids_ordered:
             raise RuntimeError("TG_ADMIN_CHAT_ID 为空")
-        # 用于 sendMessage 的目标：取第一个
         self.primary_admin_chat_id = admin_ids_ordered[0]
         self.base = f"https://api.telegram.org/bot{self.token}"
         self.auto_delete_webhook = auto_delete_webhook
@@ -188,43 +189,37 @@ class BotInteractor:
     def _ensure_polling_ready(self) -> None:
         """
         Bot API 的 getUpdates 与 webhook 互斥：
-        - 如果 bot 设置了 webhook，则 getUpdates 会一直收不到消息
-        这里做一次检查，并在允许时自动 deleteWebhook。
+        如果 bot 设置了 webhook，则 getUpdates 会一直收不到消息
         """
         if self._webhook_checked:
             return
         self._webhook_checked = True
 
-        try:
-            r = requests.get(f"{self.base}/getWebhookInfo", timeout=15)
-            data = r.json()
-            if not data.get("ok"):
-                return
-            info = data.get("result") or {}
-            url = (info.get("url") or "").strip()
-            if not url:
-                return
+        r = requests.get(f"{self.base}/getWebhookInfo", timeout=15)
+        data = r.json()
+        if not data.get("ok"):
+            return
+        info = data.get("result") or {}
+        url = (info.get("url") or "").strip()
+        if not url:
+            return
 
-            if not self.auto_delete_webhook:
-                raise RuntimeError(
-                    "检测到你的 TG_BOT_TOKEN 已设置 webhook，getUpdates 无法收验证码。\n"
-                    "解决：换一个专用 bot，或先关闭 webhook（或设置 TG_DELETE_WEBHOOK=1 让脚本自动关闭）。"
-                )
+        if not self.auto_delete_webhook:
+            raise RuntimeError(
+                "检测到你的 TG_BOT_TOKEN 已设置 webhook，getUpdates 无法收验证码。\n"
+                "解决：换一个专用 bot，或先关闭 webhook（或设置 TG_DELETE_WEBHOOK=1 让脚本自动关闭）。"
+            )
 
-            log("检测到 webhook 已启用，正在 deleteWebhook…")
-            try:
-                requests.post(
-                    f"{self.base}/deleteWebhook",
-                    data={"drop_pending_updates": True},
-                    timeout=20,
-                )
-                log("deleteWebhook 已执行")
-            except Exception as e:
-                raise RuntimeError(f"deleteWebhook 失败：{e}") from None
-        except Exception:
-            raise
+        log("检测到 webhook 已启用，正在 deleteWebhook…")
+        requests.post(
+            f"{self.base}/deleteWebhook",
+            data={"drop_pending_updates": True},
+            timeout=20,
+        )
+        log("deleteWebhook 已执行")
 
     def flush_offset(self) -> int:
+        """把当前 backlog 的 update_id 吃掉，返回下一个 offset。"""
         self._ensure_polling_ready()
         try:
             r = requests.get(f"{self.base}/getUpdates", params={"timeout": 0}, timeout=15)
@@ -235,24 +230,60 @@ class BotInteractor:
             pass
         return 0
 
-    def wait_command(
-        self,
-        pattern: "re.Pattern[str]",
-        timeout: int,
-        *,
-        offset: Optional[int] = None,
-        parse_digits: bool = True,
-    ) -> Optional[str]:
+    def _from_admin(self, chat_id: str, from_user_id: str) -> bool:
+        if self.accept_any:
+            return True
+        # 允许两种：
+        # - 私聊：chat_id == from_user_id == 你的 user_id
+        # - 群聊：chat_id 是群 id（负数），from_user_id 是你的 user_id
+        return (chat_id in self.admin_ids) or (from_user_id in self.admin_ids)
+
+    def _extract_login_code(self, text: str, min_len: int = 5, max_len: int = 8) -> Optional[str]:
         """
-        仅接收来自 TG_ADMIN_CHAT_ID 的 message.text。
-        - parse_digits=True：返回提取到的 5-8 位数字（用于登录验证码）
-        - parse_digits=False：返回 pattern 捕获到的文本（用于 2FA 密码等）
+        从文本中提取 Telegram 登录验证码（5~8 位）。
+        支持：
+        - 直接发：12345
+        - /code 12345
+        - /code@BotName 12 345
+        - 12-345 等带分隔符
+        - 含零宽字符（normalize_msg 已清理）
         """
+        t = normalize_msg(text)
+
+        # 去掉常见命令前缀（可选）
+        t2 = re.sub(r"^\s*/?(?:code)(?:@\w+)?\b", "", t, flags=re.I).strip()
+
+        # 把文本中的所有数字提出来（兼容全角数字）
+        groups = re.findall(r"\d+", t2)
+        groups_ascii = [digits_to_ascii(g) for g in groups if g]
+        # 优先：存在单段 5~8 位连续数字
+        for g in reversed(groups_ascii):
+            if min_len <= len(g) <= max_len:
+                return g
+
+        # 次优：把多段拼接（比如 12 345 或 12-345）
+        merged = "".join(groups_ascii)
+        if min_len <= len(merged) <= max_len:
+            return merged
+
+        # 再次尝试：在原始文本（含命令）里找
+        groups2 = re.findall(r"\d+", t)
+        groups2_ascii = [digits_to_ascii(g) for g in groups2 if g]
+        for g in reversed(groups2_ascii):
+            if min_len <= len(g) <= max_len:
+                return g
+        merged2 = "".join(groups2_ascii)
+        if min_len <= len(merged2) <= max_len:
+            return merged2
+
+        return None
+
+    def wait_login_code(self, timeout: int, *, offset: Optional[int] = None) -> Optional[str]:
+        """等待验证码（5~8 位），只接受来自 TG_ADMIN_CHAT_ID 的消息。"""
         self._ensure_polling_ready()
         offset = self.flush_offset() if offset is None else int(offset)
+
         deadline = time.time() + timeout
-        last_desc: str = ""
-        last_desc_ts = 0.0
         last_heartbeat = 0.0
 
         while time.time() < deadline:
@@ -266,20 +297,14 @@ class BotInteractor:
                 if not data.get("ok"):
                     desc = str(data.get("description") or "").strip()
                     if desc:
-                        # 这类问题通常不会“等一等就好”，直接报错更友好
                         if "Conflict" in desc or "webhook" in desc.lower():
                             raise RuntimeError(
                                 "Telegram Bot getUpdates 失败："
                                 f"{desc}\n"
-                                "可能原因：该 bot 设置了 webhook，或同一个 TG_BOT_TOKEN 正被其它程序/服务拉取更新。\n"
+                                "可能原因：同一个 TG_BOT_TOKEN 正被其它程序拉取更新，或 webhook 未关闭。\n"
                                 "解决：停掉其它实例/删除 webhook（或换一个专用 bot）。"
                             )
-                        # 其它错误：降频打印，避免刷屏
-                        now = time.time()
-                        if desc != last_desc or (now - last_desc_ts) > 30:
-                            log(f"Telegram Bot getUpdates 返回错误：{desc}")
-                            last_desc = desc
-                            last_desc_ts = now
+                        log(f"Telegram Bot getUpdates 返回错误：{desc}")
                     time.sleep(2)
                     continue
 
@@ -296,76 +321,98 @@ class BotInteractor:
                     chat_id = str(chat.get("id") or "").strip()
                     from_user = msg.get("from") or {}
                     from_user_id = str(from_user.get("id") or "").strip()
-
                     text = (msg.get("text") or "").strip()
+
                     if self.debug_updates:
-                        redacted = redact_text(text)[:120]
                         log(
                             "DEBUG update: "
                             f"chat_id={redact_id(chat_id)} "
                             f"from_id={redact_id(from_user_id)} "
-                            f"text={redacted!r}"
+                            f"text={redact_text(text)!r}"
                         )
 
-                    m = pattern.match(text)
-                    if not m:
+                    if not self._from_admin(chat_id, from_user_id):
+                        # 如果看起来像验证码/命令，给个提示，方便排查 TG_ADMIN_CHAT_ID 配置
+                        if re.search(r"\d", text) or text.strip().startswith("/code"):
+                            log(
+                                "收到疑似验证码消息，但来源 ID 不匹配："
+                                f"chat_id={redact_id(chat_id)} from_id={redact_id(from_user_id)}"
+                                "（请检查 TG_ADMIN_CHAT_ID，或临时设置 TG_ACCEPT_ANY=1 排查）"
+                            )
                         continue
 
-                    # 取第一个非空捕获组（兼容使用 alternation 的 pattern）
-                    payload = ""
-                    for g in m.groups():
-                        if g is None:
-                            continue
-                        s = str(g).strip()
-                        if s:
-                            payload = s
-                            break
-                    if not payload:
-                        continue
+                    code = self._extract_login_code(text)
+                    if code:
+                        return code
 
-                    if parse_digits:
-                        # 允许验证码里带空格/分隔符/不可见字符：提取所有数字后再判断长度
-                        digits_all = digits_to_ascii(payload)
-                        if 5 <= len(digits_all) <= 8:
-                            payload = digits_all
-                        else:
-                            # 再尝试从 payload 内找 5-8 位连续数字（比如消息里夹了其它数字）
-                            groups = [digits_to_ascii(g) for g in re.findall(r"\d{5,8}", payload)]
-                            if groups:
-                                payload = groups[-1]
-                            else:
-                                if self.debug_updates:
-                                    log(f"DEBUG payload 无法解析为 5-8 位数字：{redact_text(payload)!r}")
-                                continue
+                    if self.debug_updates:
+                        # 明确告诉你“收到了，但没解析出来”
+                        norm = normalize_msg(text)
+                        log(f"DEBUG 收到消息但无法解析出 5-8 位验证码：{redact_text(norm)!r}")
 
-                    if self.accept_any:
-                        return payload
-
-                    # 兼容两种配置方式：
-                    # - TG_ADMIN_CHAT_ID=你和 bot 私聊的 chat_id（=你的 user_id）
-                    # - TG_ADMIN_CHAT_ID=群 chat_id（负数 -100...）
-                    # 同时也允许：在群里发 /code，但 TG_ADMIN_CHAT_ID 配的是你的 user_id
-                    if chat_id in self.admin_ids or from_user_id in self.admin_ids:
-                        return payload
-
-                    # 只对“看起来像命令”的文本做提示，避免泄露其它聊天信息
-                    log(
-                        "收到 /code 或 /pwd，但来源 ID 不匹配："
-                        f"chat_id={redact_id(chat_id)} from_id={redact_id(from_user_id)}"
-                        "（请检查 TG_ADMIN_CHAT_ID 或设置 TG_ACCEPT_ANY=1）"
-                    )
             except RuntimeError:
                 raise
             except Exception:
                 pass
 
-            # 心跳日志，帮助排查“没收到验证码”
             now = time.time()
             if self.debug_updates and (now - last_heartbeat) > 20:
-                log(f"DEBUG waiting /code ... offset={offset}")
+                log(f"DEBUG waiting code ... offset={offset}")
                 last_heartbeat = now
 
             time.sleep(1)
+
+        return None
+
+    def wait_password(self, timeout: int, *, offset: Optional[int] = None) -> Optional[str]:
+        """等待 /pwd xxx（2FA 密码）"""
+        self._ensure_polling_ready()
+        offset = self.flush_offset() if offset is None else int(offset)
+        deadline = time.time() + timeout
+
+        while time.time() < deadline:
+            try:
+                r = requests.get(
+                    f"{self.base}/getUpdates",
+                    params={"timeout": 20, "offset": offset},
+                    timeout=35,
+                )
+                data = r.json()
+                if not data.get("ok"):
+                    time.sleep(2)
+                    continue
+
+                for upd in data.get("result", []):
+                    offset = int(upd["update_id"]) + 1
+                    msg = upd.get("message") or upd.get("edited_message") or {}
+                    chat = msg.get("chat") or {}
+                    chat_id = str(chat.get("id") or "").strip()
+                    from_user = msg.get("from") or {}
+                    from_user_id = str(from_user.get("id") or "").strip()
+                    text = (msg.get("text") or "").strip()
+
+                    if self.debug_updates:
+                        log(
+                            "DEBUG update: "
+                            f"chat_id={redact_id(chat_id)} "
+                            f"from_id={redact_id(from_user_id)} "
+                            f"text={redact_text(text)!r}"
+                        )
+
+                    if not self._from_admin(chat_id, from_user_id):
+                        continue
+
+                    t = normalize_msg(text)
+                    m = re.match(r"^/pwd(?:@\w+)?\s*(.*)$", t)
+                    if m:
+                        pwd = (m.group(1) or "").strip()
+                        if pwd:
+                            return pwd
+            except Exception:
+                pass
+
+            time.sleep(1)
+
         return None
 
 
@@ -420,10 +467,7 @@ def parse_tasks(raw: str) -> List[SignTask]:
 
     if raw.startswith("{") or raw.startswith("["):
         data = json.loads(raw)
-        if isinstance(data, dict):
-            items = data.get("tasks")
-        else:
-            items = data
+        items = data.get("tasks") if isinstance(data, dict) else data
         if not isinstance(items, list):
             raise RuntimeError("TG_SIGN_TASKS JSON 需为数组，或 {\"tasks\": [...]}")
         tasks: List[SignTask] = []
@@ -437,8 +481,6 @@ def parse_tasks(raw: str) -> List[SignTask]:
             tasks.append(SignTask(chat=chat, text=text))
         return tasks
 
-    # 非 JSON：每行 / 每段一个任务
-    # 推荐格式：chat|text
     chunks = []
     for part in re.split(r"[;\n]+", raw):
         line = part.strip()
@@ -473,9 +515,7 @@ async def ensure_login(
     allow_print_session: bool,
     updater: Optional[GitHubSecretUpdater],
 ) -> str:
-    """
-    确保已登录，返回 session string（无论是否已有）。
-    """
+    """确保已登录，返回 session string。"""
     await client.connect()
     if await client.is_user_authorized():
         return client.session.save()
@@ -486,34 +526,31 @@ async def ensure_login(
     log("未检测到授权，开始登录流程…")
     log("正在向 Telegram 请求登录验证码（send_code_request）…")
     sent = await client.send_code_request(phone_number)
-    log("验证码已发送（请在 Telegram App/SMS 查看），随后把验证码发给机器人：直接发送数字验证码（或 /code 12345）")
+
+    log("验证码已发送（请在 Telegram App/SMS 查看）。")
+    log("请把验证码发给机器人：直接发送数字（例如 12345），或发送 /code 12345")
 
     code: Optional[str] = None
     if bot is not None:
         offset = bot.flush_offset()
         bot.send(
             "需要 Telegram 登录验证码。\n"
-            f"请在 {code_timeout}s 内回复：直接发送验证码数字（例如 12345），也可以 /code 12345\n"
+            f"请在 {code_timeout}s 内回复：直接发送验证码数字（例如 12345），或 /code 12345\n"
             "（只接受来自 TG_ADMIN_CHAT_ID 的消息）"
         )
         log(f"已发送提示到 Telegram，等待验证码（最长 {code_timeout}s）…")
-        code = bot.wait_command(
-            # group(1) 会进一步提取数字（兼容 123456 / 123 456 / 123-456 / "123456" 等格式）
-            # 这里用 \s* 而不是 \s+，以兼容 Telegram 里可能出现的“不可见分隔符”
-            re.compile(r"^\s*(?:/code(?:@\w+)?\s*)?[\"'“”]?(\d[\d\s-]{4,15})[\"'“”]?\s*$"),
-            timeout=code_timeout,
-            offset=offset,
-        )
+        code = bot.wait_login_code(timeout=code_timeout, offset=offset)
     else:
         code = input("请输入 Telegram 登录验证码：").strip()
 
     if not code:
         raise RuntimeError(
-            "未收到验证码（/code 或 5-8 位数字），登录失败。\n"
-            "排查：\n"
+            "未收到有效验证码（5-8 位数字），登录失败。\n"
+            "排查建议：\n"
             "1) 确认你是在收到提示的同一个聊天窗口回复（私聊/群）。\n"
-            "2) 检查 TG_ADMIN_CHAT_ID 是否填对：私聊=你的 user_id；群里=群 chat_id（-100...）。\n"
-            "3) 如果 bot 配过 webhook/被占用，设置 TG_DELETE_WEBHOOK=1 再跑 TG_LOGIN。"
+            "2) 检查 TG_ADMIN_CHAT_ID：私聊=你的 user_id；群里=群 chat_id（-100...）。\n"
+            "3) 若同一 bot 同时被其它服务拉取更新，或 webhook 未关闭：设置 TG_DELETE_WEBHOOK=1 或换专用 bot。\n"
+            "4) 可临时设置 TG_ACCEPT_ANY=1 验证是否是 ID 过滤导致。"
         )
 
     log(f"已收到验证码：{redact_text(code)!r}，开始 sign_in…")
@@ -525,11 +562,7 @@ async def ensure_login(
         if not password and bot is not None:
             bot.send("检测到开启了两步验证(2FA)。请回复：/pwd 你的密码")
             log(f"等待 /pwd（最长 {code_timeout}s）…")
-            password = bot.wait_command(
-                re.compile(r"^/pwd(?:@\w+)?\s*(.*)$"),
-                timeout=code_timeout,
-                parse_digits=False,
-            )
+            password = bot.wait_password(timeout=code_timeout)
 
         if not password and sys.stdin.isatty():
             password = input("请输入两步验证(2FA)密码：").strip()
@@ -544,7 +577,6 @@ async def ensure_login(
 
     session_str = client.session.save()
 
-    # Actions 中尽量不要直接把 session 打到日志里
     if updater is not None:
         ok = updater.update_secret("TG_SESSION", session_str)
         if ok:
@@ -635,9 +667,9 @@ async def async_main(args: argparse.Namespace) -> int:
     bot_token = (env("TG_BOT_TOKEN") or "").strip()
     admin_chat_id = (env("TG_ADMIN_CHAT_ID") or "").strip()
     auto_delete_webhook = env_bool("TG_DELETE_WEBHOOK", default=False)
-    # 默认打开调试日志，必要时可 TG_DEBUG_UPDATES=0 关闭
     debug_updates = env_bool("TG_DEBUG_UPDATES", default=True)
     accept_any = env_bool("TG_ACCEPT_ANY", default=False)
+
     bot: Optional[BotInteractor] = None
     if bot_token and admin_chat_id:
         bot = BotInteractor(
@@ -660,7 +692,6 @@ async def async_main(args: argparse.Namespace) -> int:
 
     client = TelegramClient(StringSession(session_str or None), api_id, api_hash)
     try:
-        # 确保登录（并在需要时写回 TG_SESSION）
         _ = await ensure_login(
             client=client,
             phone_number=phone_number,
