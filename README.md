@@ -13,15 +13,62 @@
    - `TG_API_ID`
    - `TG_API_HASH`
 <details>
+
+第一步 打开官方网址：https://my.telegram.org/  并输入你的电报手机号码 (记得带 + 号) 点击：NEXT  
+
+
 <img src="png/image.png" alt="登录" width="300">
+
+第二步 这时候你的电报会收到一个 code （复制） 如下图：
+
+<img src="png/image2.png" alt="登录" width="300">
+
+第三步 填写到 code  并点击：Sign IN   如下图：
+
+<img src="png/image3.png" alt="登录" width="300">
+
+第四步 登录成功后  点击：API development tools
+
+<img src="png/image4.png" alt="登录" width="300">
+第五步 这时候你会进入一个页面填写：App title  和  Short name   就可以创建一个应用 ID 和 HASH  最终得到图下图
+
+在输入：App title  和  Short name  创建应用时好像很容易报错或失败，请尝试输入不同的 Short name 或者换干净IP多试几次才可以成功
+
+自己记住：api_id  和 api_hash （按对应项目要求填写到对应位置即可）不同的项目源码可能填写的位置不一样
+
+<img src="png/image5.png" alt="登录" width="300">
+
+
+
 </details>
 
 2. Telegram 手机号：`TG_PHONE_NUMBER`（国际格式，例如 `+86...`）
 3. 创建一个“通知机器人”（@BotFather），拿到：
    - `TG_BOT_TOKEN`
+<details>
+
+打开应用  @BotFather 
+<img src="png/image6.png" alt="创建机器人" width="300">
+
+点击创建
+
+<img src="png/image7.png" alt="创建机器人" width="300">
+
+<img src="png/image8.png" alt="创建机器人" width="300">
+
+<img src="png/image9.png" alt="创建机器人" width="300">
+
+
+</details>
+
 4. 获取你和机器人对话的 `chat_id`（也就是你说的“我的对话 id”）：
    - 先给机器人发任意一句话，然后用 Bot API 的 `getUpdates` 能看到 `message.chat.id`
    - 把这个值填到：`TG_ADMIN_CHAT_ID`
+<details>
+点自己的头像复制ID
+<img src="png/image10.png" alt="复制chat_id" width="300">
+
+</details>
 
 ## 2) 配置 GitHub Secrets（仓库 Settings → Secrets and variables → Actions）
 
