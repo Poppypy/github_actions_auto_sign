@@ -12,6 +12,10 @@
 1. 在 `https://my.telegram.org` 申请：
    - `TG_API_ID`
    - `TG_API_HASH`
+<details>
+![alt text](image.png)
+</details>
+
 2. Telegram 手机号：`TG_PHONE_NUMBER`（国际格式，例如 `+86...`）
 3. 创建一个“通知机器人”（@BotFather），拿到：
    - `TG_BOT_TOKEN`
@@ -46,7 +50,8 @@
 ```json
 [
   {"chat": "@jdHappybot", "text": "/qd"},
-  {"chat": "-1001234567890", "text": "签到"}
+  {"chat": "@tuoyi03bot", "text": "🌍 每日签到"},
+  {"chat": "@jrsgk4_bot", "text": "/checkin"}
 ]
 ```
 
